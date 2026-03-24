@@ -1,6 +1,9 @@
+from __future__ import annotations  # Using class names for types without Ruff F821
 import json
 
-from .stores import BaseStore, ReadableStore, WritableStore, ListableStore, _check_key
+import numpy as np
+
+from .stores import ReadableStore, WritableStore, ListableStore
 
 
 def load_zarr(store: ReadableStore) -> ZarrNode:
@@ -14,7 +17,7 @@ def join(*path_parts):
 class ZarrNode:
     def __init__(
         self,
-        store: ReadableStore | ListableStore,
+        store: ReadableStore | ListableStore | WritableStore,
         path: str,
         _metadata: dict | None = None,
     ):
@@ -113,11 +116,10 @@ class ZarrGroup(ZarrNode):
             for child in self.children:
                 r += "\n"
                 if isinstance(child, ZarrGroup):
-                    r += child.get_structure(indent + 4, max_depth-1)
+                    r += child.get_structure(indent + 4, max_depth - 1)
                 else:
                     r += " " * (indent + 4) + child._one_line_repr()
         return r
-
 
     def __getitem__(self, path):
         if not isinstance(path, str):
@@ -152,8 +154,8 @@ class ZarrGroup(ZarrNode):
         # todo: use consolidated metadata
         # todo: use list_dir only lazily
 
-        n = len( self._path)
-        items = self._store.list_dir( self._path + "/")
+        n = len(self._path)
+        items = self._store.list_dir(self._path + "/")
         dir_names = [item[n:].strip("/") for item in items if item.endswith("/")]
 
         self._children = {}
@@ -229,8 +231,7 @@ class ZarrArray(ZarrNode):
 
         self._attributes = meta.get("attributes", None)
         self._storage_transformers = meta.get("storage_transformers", None)
-        self._dimension_names =meta.get("dimension_names", None)
-
+        self._dimension_names = meta.get("dimension_names", None)
 
     def _init_node(self):
         pass
