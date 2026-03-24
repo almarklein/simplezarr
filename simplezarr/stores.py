@@ -225,7 +225,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         return super().erase_values(keys)  # use default implementation
 
     def erase_prefix(self, prefix: str):
-        return super().erase_prefix(keys)  # use default implementation
+        return super().erase_prefix(prefix)  # use default implementation
         # could use shutil.rmtree if we want to optimize this
 
     def list(self) -> list[str]:
