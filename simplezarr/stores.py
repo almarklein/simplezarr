@@ -1,78 +1,128 @@
 """
-The store interface and some implementations.
+The store interface and implementations. This code follows the abstract store
+interface as defines in the Zarr spec:
 
-https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html
+    https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html
 
 Some quotes from the spec, for easy reference:
 
-* The store interface is intended to be simple to implement using a
-  variety of different underlying storage technologies.
-* It is assumed that the store holds (key, value) pairs, with only one
-  such pair for any given key. I.e., a store is a mapping from keys to
-  values.
-* It is also assumed that keys are case sensitive, i.e., the keys “foo”
-  and “FOO” are different.
-* In the context of this interface, a key is a Unicode string, where
-  the final character is not a '/' character.
-* In the context of this interface, a prefix is a string containing
-  only characters that are valid for use in keys and ending with a
-  trailing '/' character.
-* The store operations are grouped into three sets of capabilities:
-  readable, writeable and listable. It is not necessary for a store
-  implementation to support all of these capabilities.
+* The store interface is intended to be simple to implement using a variety of
+  different underlying storage technologies.
+* It is assumed that the store holds (key, value) pairs, with only one such pair
+  for any given key. I.e., a store is a mapping from keys to values.
+* It is also assumed that keys are case sensitive, i.e., the keys “foo” and
+  “FOO” are different.
+* In the context of this interface, a key is a Unicode string, where the final
+  character is not a '/' character.
+* In the context of this interface, a prefix is a string containing only
+  characters that are valid for use in keys and ending with a trailing '/'
+  character.
+* The store operations are grouped into three sets of capabilities: readable,
+  writeable and listable. It is not necessary for a store implementation to
+  support all of these capabilities.
 
+Further, the spec seems to assume that there is no dash prefix; so "a/b", rather
+than "/a/b". We follow this in the stores.
 """
 
 from pathlib import Path
 
+List = list  # for typing
 
-def _check_key(ob: object, method: str, key: str, name: str = "key"):
+
+def check_key(ob: object, method: str, key: str) -> str:
     if not isinstance(key, str):
         raise TypeError(
-            f"{ob.__class__.__name__}.{method}(): {name} must be a str, got {key!r}"
+            f"{ob.__class__.__name__}.{method}(): key must be a str, got {key!r}"
         )
-    if key != "/" and key.startswith("/"):
+    if key.startswith("/"):
         raise ValueError(
-            f"{ob.__class__.__name__}.{method}(): {name} must not start with '/', got {key!r}"
+            f"{ob.__class__.__name__}.{method}(): key must not start with '/', got {key!r}"
         )
-    if name == "key":
-        if not key:
-            raise ValueError(
-                f"{ob.__class__.__name__}.{method}(): {name} must not be empty, got {key!r}"
-            )
-        if key.endswith("/"):
-            raise ValueError(
-                f"{ob.__class__.__name__}.{method}(): {name} must not end with '/', got {key!r}"
-            )
-    elif name == "prefix":  # a 'directory'
-        if not key.endswith("/"):
-            raise ValueError(
-                f"{ob.__class__.__name__}.{method}(): {name} must end with '/', got {key!r}"
-            )
+    if not key:
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): key must not be empty, got {key!r}"
+        )
+    if key.endswith("/"):
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): key must not end with '/', got {key!r}"
+        )
+    if any(name.count(".") == len(name) for name in key.split("/")):
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): prefix parts cannot only consists of period chars, got {key!r}"
+        )
+    return key
+
+
+def check_prefix(ob: object, method: str, prefix: str) -> str:
+    if not isinstance(prefix, str):
+        raise TypeError(
+            f"{ob.__class__.__name__}.{method}(): prefix must be a str, got {prefix!r}"
+        )
+    if prefix != "/" and prefix.startswith("/"):
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): prefix must not start with '/', got {prefix!r}"
+        )
+    if not prefix.endswith("/"):
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): prefix must end with '/', got {prefix!r}"
+        )
+    if len(prefix) > 1 and any(
+        name.count(".") == len(name) for name in prefix[:-1].split("/")
+    ):
+        raise ValueError(
+            f"{ob.__class__.__name__}.{method}(): prefix parts cannot only consists of period chars, got {prefix!r}"
+        )
+    return prefix
+
+
+def check_key_range(ob: object, key_range) -> tuple[str, int, int | None]:
+    if not (isinstance(key_range, tuple) and len(key_range) == 3):
+        raise TypeError(
+            "f{ob.__class__.__name__}.get_partial_values(): key_ranges entries must be 3-element tuples."
+        )
+    return key_range
+
+
+def check_key_start_value(ob: object, key_start_value) -> tuple[str, int, bytes]:
+    if not (isinstance(key_start_value, tuple) and len(key_start_value) == 3):
+        raise TypeError(
+            "f{ob.__class__.__name__}.set_partial_values(): key_start_values entries must be 3-element tuples."
+        )
+    return key_start_value
 
 
 class BaseStore:
+    """The base store class."""
+
     pass
 
 
 class ReadableStore(BaseStore):
+    """A store that can read keys.
+
+    Partial getting is implemented in this base class by using ``.get()``, and
+    then taking a slice.
+    """
+
     def get(self, key: str) -> bytes:
         """Retrieve the value associated with a given key."""
-        _check_key(self, "get", key)
+        check_key(self, "get", key)
         raise NotImplementedError()
 
     def get_partial_values(
-        self, key_ranges: list[tuple[str, int, int | None]]
+        self, key_ranges: List[tuple[str, int, int | None]]
     ) -> list[bytes]:
         """Retrieve possibly partial values from given key_ranges.
 
         The ``key_ranges`` is an iterable of (key, range_start, range_length),
         where range_length may be None to indicate the full remaining length.
         """
-        # Default implementation
+        # Default implementation, using .get()
         result = []
-        for key, start, length in key_ranges:
-            _check_key(self, "get_partial_values", key)
+        for key_range in key_ranges:
+            key, start, length = check_key_range(self, key_range)
+            check_key(self, "get_partial_values", key)
             i1 = int(start)
             i2 = None if length is None else i1 + length
             full_value = self.get(key)
@@ -81,16 +131,25 @@ class ReadableStore(BaseStore):
 
 
 class WritableStore(BaseStore):
+    """A store that can write and delete keys.
+
+    Partial setting is implemented in this base class by using ``.get()``,
+    updating the value, and then ``.set()``. Similarly, ``erase_values()`` and
+    ``erase_prefix()`` are implemented in the base class; they can be overridden
+    if a subclass can implement it more efficiently.
+    """
+
     def set(self, key: str, value: bytes):
         """Store a (key, value) pair."""
-        _check_key(self, "set", key)
+        check_key(self, "set", key)
         raise NotImplementedError()
 
-    def set_partial_values(self, key_start_values: list[tuple[str, int, bytes]]):
+    def set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
         """Store values at a given key, starting at byte range_start."""
-        # Default implementation, assumes ReadableStore with .get()
-        for key, start, value in key_start_values:
-            _check_key(self, "set_partial_values", key)
+        # Default implementation, using .get()
+        for key_start_value in key_start_values:
+            key, start, value = check_key_start_value(self, key_start_value)
+            check_key(self, "set_partial_values", key)
             i1 = int(start)
             i2 = i1 + len(value)
             full_value = self.get(key)
@@ -99,14 +158,14 @@ class WritableStore(BaseStore):
 
     def erase(self, key: str):
         """Erase the given key/value pair from the store."""
-        _check_key(self, "erase", key)
+        check_key(self, "erase", key)
         raise NotImplementedError()
 
-    def erase_values(self, keys: list[str]):
+    def erase_values(self, keys: List[str]):
         """Erase the given key/value pairs from the store."""
-        # Default implementation
+        # Default implementation, using .erase()
         for key in keys:
-            _check_key(self, "erase_values", key)
+            check_key(self, "erase_values", key)
             self.erase(key)
 
     def erase_prefix(self, prefix: str):
@@ -114,19 +173,24 @@ class WritableStore(BaseStore):
 
         The prefix represents a 'directory'; it must end with a '/'.
         """
-        # Default implementation, assumes ListableStore with .list_prefix()
-
-        _check_key(self, "erase_values", prefix, "prefix")
+        # Default implementation, using .list_prefix()
+        check_prefix(self, "erase_values", prefix)
         for key in self.list_prefix(prefix):
             self.erase(key)
 
 
 class ListableStore(BaseStore):
+    """A store that can list keys.
+
+    Although ``list_prefix()`` and ``list_dir()`` are implemented in this base
+    class, subclasses can likely implement them more efficiently.
+    """
+
     def list(self) -> list[str]:
         """Retrieve all keys in the store."""
         raise NotImplementedError()
 
-    def list_prefix(self, prefix: str) -> list[str]:
+    def list_prefix(self, prefix: str) -> List[str]:
         """Retrieve all keys with a given prefix.
 
         The prefix represents a 'directory'; it must end with a '/'. This method
@@ -135,11 +199,12 @@ class ListableStore(BaseStore):
         For example, if a store contains the keys “a/b”, “a/c/d” and “e/f/g”,
         then ``list_prefix("a/")`` would return “a/b” and “a/c/d”.
         """
-        # Default implementation
-        _check_key(self, "list_prefix", prefix, "prefix")
+        # Default implementation, using .list()
+        check_prefix(self, "list_prefix", prefix)
+        prefix = "" if prefix == "/" else prefix  # Special case
         return [key for key in self.list() if key.startswith(prefix)]
 
-    def list_dir(self, prefix: str) -> list[str]:
+    def list_dir(self, prefix: str) -> List[str]:
         """Retrieve all keys within a given directory.
 
         The prefix represents a 'directory'; it must end with a '/'. This method
@@ -152,8 +217,9 @@ class ListableStore(BaseStore):
         prefixes “a/d/” and “a/f/”. ``list_dir("b/")`` would return the empty
         set.
         """
-        # Default implementation
-        _check_key(self, "list_dir", prefix, "prefix")
+        # Default implementation, using .list()
+        check_prefix(self, "list_dir", prefix)
+        prefix = "" if prefix == "/" else prefix  # Special case
         n = len(prefix)
         keys = set()
         for key in self.list():
@@ -166,7 +232,48 @@ class ListableStore(BaseStore):
 # %%%%% Implementations
 
 
+class MemoryStore(ReadableStore, WritableStore, ListableStore):
+    """Implementation of a readable, writable and listable store, based on an in-memory dict."""
+
+    def __init__(self, fields: dict | None = None):
+        self._store = {}
+        if fields:
+            for k, v in fields.items():
+                self.set(k, v)
+
+    def get(self, key: str) -> bytes:
+        check_key(self, "get", key)
+        try:
+            return self._store[key]
+        except KeyError:
+            raise IOError(f"get(): key {key!r} does not exist.") from None
+
+    def set(self, key: str, value: bytes):
+        check_key(self, "set", key)
+        dir = ""
+        for d in key.split("/")[:-1]:
+            dir += f"{d}/"
+            if dir[:-1] in self._store:
+                raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+        self._store[key] = value
+
+    def erase(self, key: str):
+        check_key(self, "erase", key)
+        try:
+            self._store.pop(key)
+        except KeyError:
+            raise IOError(f"erase(): key {key!r} does not exist.") from None
+
+    def list(self) -> list[str]:
+        return sorted(self._store.keys())
+
+
 class LocalStore(ReadableStore, WritableStore, ListableStore):
+    """Implementation of a readable, writable and listable store, based on the local file system.
+
+    The given path represents the root of the store.
+    """
+
     def __init__(self, path: str | Path):
         self._path = Path(path)
 
@@ -174,7 +281,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         return f"<LocalStore '{self._path}' at {hex(id(self))}>"
 
     def get(self, key: str) -> bytes:
-        _check_key(self, "get", key)
+        check_key(self, "get", key)
         p = self._path.joinpath(*key.split("/"))
         if p.is_file():
             return p.read_bytes()
@@ -182,11 +289,12 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
             raise IOError(f"get(): key {key!r} does not exist.")
 
     def get_partial_values(
-        self, key_ranges: list[str, tuple[int, int | None]]
+        self, key_ranges: List[tuple[str, int, int | None]]
     ) -> list[bytes]:
         result = []
-        for key, start, length in key_ranges:
-            _check_key(self, "get_partial_values", key)
+        for key_range in key_ranges:
+            key, start, length = check_key_range(self, key_range)
+            check_key(self, "get_partial_values", key)
             i1 = int(start)
             length = None if length is None else int(length)
             p = self._path.joinpath(*key.split("/"))
@@ -198,30 +306,31 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         return result
 
     def set(self, key: str, value: bytes):
-        _check_key(self, "set", key)
+        check_key(self, "set", key)
         p = self._path.joinpath(*key.split("/"))
-        p.parent.mkdir(parent=False, exist_ok=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(value)
 
-    def set_partial_values(self, key_start_values: list[tuple[str, int, bytes]]):
-        for key, start, value in key_start_values:
-            _check_key(self, "set_partial_values", key)
+    def set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
+        for key_start_value in key_start_values:
+            key, start, value = check_key_start_value(self, key_start_value)
+            check_key(self, "set_partial_values", key)
             i1 = int(start)
             p = self._path.joinpath(*key.split("/"))
-            p.parent.mkdir(parent=False, exist_ok=True)
-            with p.open("ab") as f:
+            p.parent.mkdir(parents=False, exist_ok=True)
+            with p.open("r+b") as f:
                 f.seek(i1)
                 f.write(value)
 
     def erase(self, key: str):
-        _check_key(self, "erase", key)
+        check_key(self, "erase", key)
         p = self._path.joinpath(*key.split("/"))
         if p.is_file():
             p.unlink()
         else:
             raise IOError(f"erase(): key {key!r} does not exist.")
 
-    def erase_values(self, keys: list[str]):
+    def erase_values(self, keys: List[str]):
         return super().erase_values(keys)  # use default implementation
 
     def erase_prefix(self, prefix: str):
@@ -229,19 +338,102 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         # could use shutil.rmtree if we want to optimize this
 
     def list(self) -> list[str]:
-        return sorted([str(p.relative_to(self._path)) for p in self._path.rglob("*")])
+        return sorted(
+            [
+                str(p.relative_to(self._path))
+                for p in self._path.rglob("*")
+                if p.is_file()
+            ]
+        )
 
     def list_prefix(self, prefix: str) -> list[str]:
-        _check_key(self, "list_prefix", prefix, "prefix")
+        check_prefix(self, "list_prefix", prefix)
         d = self._path.joinpath(*prefix.split("/"))
-        return sorted([str(p.relative_to(self._path)) for p in d.rglob("*")])
+        return sorted(
+            [str(p.relative_to(self._path)) for p in d.rglob("*") if p.is_file()]
+        )
 
     def list_dir(self, prefix: str) -> list[str]:
-        _check_key(self, "list_dir", prefix, "prefix")
+        check_prefix(self, "list_dir", prefix)
         d = self._path.joinpath(*prefix.split("/"))
+        if not d.is_dir():
+            return []
         keys = set()
         for p in d.iterdir():
             key = str(p.relative_to(self._path))
             dash = "/" if p.is_dir() else ""
             keys.add(key + dash)
         return sorted(keys)
+
+
+class WrapperStore(ReadableStore, WritableStore, ListableStore):
+    """A store that wraps another store."""
+
+    def __init__(self, store: ReadableStore | WritableStore | ListableStore):
+        self._store = store
+
+    def hook(self, method, args, result):
+        pass
+
+    def get(self, key: str) -> bytes:
+        result = self._store.get(key)
+        self.hook("get", (key,), result)
+        return result
+
+    def get_partial_values(
+        self, key_ranges: List[tuple[str, int, int | None]]
+    ) -> list[bytes]:
+        result = self._store.get_partial_values(key_ranges)
+        self.hook("get_partial_values", (key_ranges,), result)
+        return result
+
+    def set(self, key: str, value: bytes):
+        result = self._store.set(key, value)
+        self.hook("set", (key, value), result)
+        return result
+
+    def set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
+        result = self._store.set_partial_values(key_start_values)
+        self.hook("set_partial_values", (key_start_values,), result)
+        return result
+
+    def erase(self, key: str):
+        result = self._store.erase(key)
+        self.hook("erase", (key,), result)
+        return result
+
+    def erase_values(self, keys: List[str]):
+        result = self._store.erase_values(keys)
+        self.hook("erase_values", (keys,), result)
+        return result
+
+    def erase_prefix(self, prefix: str):
+        result = self._store.erase_prefix(prefix)
+        self.hook("erase_prefix", (prefix), result)
+        return result
+
+    def list(self) -> list[str]:
+        result = self._store.list()
+        self.hook("list", (), result)
+        return result
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        result = self._store.list_prefix(prefix)
+        self.hook("list_prefix", (prefix,), result)
+        return result
+
+    def list_dir(self, prefix: str) -> list[str]:
+        result = self._store.list_dir(prefix)
+        self.hook("list_dir", (prefix,), result)
+        return result
+
+
+# More store ideas:
+#
+# class SlowStore:
+# class LoggingStore:
+# class ZipStore:
+# class S3Store:
+# class HttpStore:
+
+# %%

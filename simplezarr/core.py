@@ -1,3 +1,5 @@
+""" """
+
 from __future__ import annotations  # Using class names for types without Ruff F821
 import json
 
