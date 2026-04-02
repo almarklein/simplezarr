@@ -2,10 +2,12 @@
 
 from __future__ import annotations  # Using class names for types without Ruff F821
 import json
+import math
 
 import numpy as np
 
 from .stores import ReadableStore, WritableStore, ListableStore
+from .codecs import create_ndarray_type, encode_array, decode_bytes
 
 
 def load_zarr(store: ReadableStore) -> ZarrNode:
@@ -48,6 +50,9 @@ class ZarrNode:
         self._parse_metadata()
         self._init_node()
 
+    def __repr__(self):
+        return self._one_line_repr()
+
     @classmethod
     def _from_path(cls, store, path):
         json_text = store.get(join(path, "zarr.json")).decode()
@@ -80,7 +85,7 @@ class ZarrNode:
     def metadata(self):
         return self._metadata
 
-    def pprint_metadata(self):
+    def print_metadata(self):
         print(json.dumps(self._metadata, indent=4))
 
     def _one_line_repr(self):
@@ -108,7 +113,7 @@ class ZarrGroup(ZarrNode):
     def attributes(self):
         return self._attributes
 
-    def show_structure(self, max_depth=999):
+    def print_structure(self, max_depth=999):
         print(self.get_structure(max_depth=max_depth))
 
     def get_structure(self, max_depth=999, indent=0):
@@ -118,7 +123,7 @@ class ZarrGroup(ZarrNode):
             for child in self.children:
                 r += "\n"
                 if isinstance(child, ZarrGroup):
-                    r += child.get_structure(indent + 4, max_depth - 1)
+                    r += child.get_structure(max_depth - 1, indent + 4)
                 else:
                     r += " " * (indent + 4) + child._one_line_repr()
         return r
@@ -171,9 +176,7 @@ class ZarrGroup(ZarrNode):
 
 
 class ZarrArray(ZarrNode):
-    def __repr__(self):
-        return self._one_line_repr()
-        # todo: could add info on chunks
+    # todo: could add info on chunks
 
     def _one_line_repr(self):
         shape_str = "x".join(str(i) for i in self.shape)
@@ -192,6 +195,10 @@ class ZarrArray(ZarrNode):
         return self._dtype
 
     @property
+    def chunk_grid_shape(self) -> tuple[int, ...]:
+        return self._chunk_grid_shape
+
+    @property
     def chunk_shape(self) -> tuple[int, ...]:
         return self._chunk_shape
 
@@ -200,7 +207,48 @@ class ZarrArray(ZarrNode):
         return int(np.prod(self._chunk_shape))
 
     def get_chunk(self, *index):
-        pass
+        # Check index
+        if len(index) != len(self._shape):
+            raise IndexError(f"ZarrArray.get_chunk() needs {len(self._shape)} indices.")
+        if not all(isinstance(i, int) for i in index):
+            raise ValueError("ZarrArray.get_chunk() needs integer indices.")
+
+        # Load data. This could take a while if it's a remote/slow store
+        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        try:
+            encoded_bytes = self._store.get(path)
+        except IOError:
+            return np.full(self._chunk_shape, self._fill_value, self._dtype)
+
+        # Return decoded
+        array_type = create_ndarray_type(self._chunk_shape, self._dtype)
+        return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
+
+    def set_chunk(self, value, *index, check_empty=True):
+        # Check index
+        if len(index) != len(self._shape):
+            raise IndexError(f"ZarrArray.get_chunk() needs {len(self._shape)} indices.")
+        if not all(isinstance(i, int) for i in index):
+            raise ValueError("ZarrArray.get_chunk() needs integer indices.")
+
+        # Check value
+        if not isinstance(value, np.ndarray):
+            raise TypeError("A chunk should be a numpy array")
+        if not (value.shape == self._chunk_shape and value.dtype == self._dtype):
+            raise ValueError(
+                f"Chunk must have shape {self._chunk_shape!r} and dtype {self._dtype!r}, but got {value.shape!r} and {value.dtype!r}"
+            )
+
+        # Write (or erase) the chunk
+        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        if check_empty and np.all(value == self._fill_value):
+            try:
+                self._store.erase(path)
+            except IOError:
+                pass
+        else:
+            encoded_bytes = encode_array(value, self._codecs)
+            self._store.set(path, encoded_bytes)
 
     @property
     def codec(self):
@@ -219,6 +267,11 @@ class ZarrArray(ZarrNode):
         self._chunk_grid = meta["chunk_grid"]
         assert self._chunk_grid["name"] == "regular"
         self._chunk_shape = self._chunk_grid["configuration"]["chunk_shape"]
+
+        self._chunk_grid_shape = tuple(
+            math.ceil(array_s / chunk_s)
+            for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
+        )
 
         self._chunk_key_encoding = meta["chunk_key_encoding"]
         assert self._chunk_key_encoding["name"] == "default"
