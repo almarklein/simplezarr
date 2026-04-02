@@ -1,20 +1,26 @@
 """
-https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-encoding
-https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
+The logic for Zarr codecs.
+
+References:
+
+* https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-encoding
+* https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
+
+Some quotes from the spec:
 
 * In encoding, you start with an array, and end with bytes. There is exactly one array-> bytes codec step.
 * In decoding, you start with bytes and end with an array. There is exactly one bytes-> array codec step.
 * This specification defines a set of codecs (“core codecs”) which all Zarr implementations SHOULD implement.
 
-Third party code can use can subclass ``BaseCodec`` and use ``register_codec()`` to implement custom codecs as extensions.
+Notes from simplezarr devs:
 
-In this code, bytes are represented as a 1D memoryview, so that slices can be made without making copies. Arrays are represented with numpy arrays.
-
-On error reporting:
-
-* Asserts are made only to test the internal integrity of this module.
-* CodecError is raised when the requested list of codecs is not valid, in terms of input and output types.
-* Otherwise, the appropriate Python error is raised.
+* We also implement codecs that are easy to implement because we use numcodecs.
+* Third party code can subclass ``BaseCodec`` and use ``register_codec()`` to implement custom codecs as extensions.
+* In this code, bytes are represented as a 1D memoryview, so that slices can be made without making copies. Arrays are represented with numpy arrays.
+* On error reporting:
+  * Asserts are made only to test the internal integrity of this module.
+  * CodecError is raised when the requested list of codecs is not valid, in terms of input and output types.
+  * Otherwise, the appropriate Python error is raised.
 
 """
 
@@ -25,6 +31,8 @@ import sys
 import numcodecs
 import numpy as np
 
+
+__all__ = ["create_ndarray_type", "decode_bytes", "encode_array"]
 
 CODEC_CLASS_BY_NAME = {}
 
@@ -44,15 +52,20 @@ ndarray = np.ndarray
 
 
 class CodecError(Exception):
+    """An error that is raised when the codec configuration is invalid."""
+
     pass
 
 
 class ArrayType(np.ndarray):
-    shape = ()
-    dtype = ""
+    """An array subtype that defines shape and dtype."""
+
+    shape = ()  # type: ignore
+    dtype = ""  # type: ignore
 
     @classmethod
     def match(cls, a):
+        """Check whether the given array matches the shape and dtype."""
         return (
             isinstance(a, np.ndarray) and a.shape == cls.shape and a.dtype == cls.dtype
         )
@@ -74,6 +87,7 @@ def create_ndarray_type(shape: tuple[int, ...], dtype: str):
 
 
 def is_byte_like(value):
+    """Get whether the given value is byte-like in the contex of simplezarr.codecs: a 1D memoryview with format 'B'."""
     return isinstance(value, memoryview) and value.ndim == 1 and value.format == "B"
 
 
