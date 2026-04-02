@@ -242,8 +242,7 @@ class BaseChecksumCodec(BaseCodec):
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
-        if not issubclass(decoded_representation_type, memoryview):
-            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
+        assert issubclass(decoded_representation_type, memoryview)
         return memoryview(self._numcodec_class().decode(value))
 
 
@@ -264,8 +263,7 @@ class BaseCompressionCodec(BaseCodec):
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
-        if not issubclass(decoded_representation_type, memoryview):
-            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
+        assert issubclass(decoded_representation_type, memoryview)
         return memoryview(self._numcodec_class().decode(value))
 
 
@@ -303,8 +301,7 @@ class TransposeCodec(BaseCodec):
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
-        if not issubclass(decoded_representation_type, ndarray):
-            raise CodecError(f"{self.__class__.__name__} decodes into array.")
+        assert issubclass(decoded_representation_type, ndarray)
         order = self._configuration.get("order", None)
         if order is None:
             inverse_order = None
@@ -339,8 +336,6 @@ class BytesCodec(BaseCodec):
         return memoryview(flat)
 
     def decode(self, value: memoryview, decoded_representation_type: type) -> ndarray:
-        if not issubclass(decoded_representation_type, ndarray):
-            raise CodecError("BytesCodec decodes into arrays.")
         assert issubclass(decoded_representation_type, ArrayType)
 
         arr = np.frombuffer(value, decoded_representation_type.dtype)
@@ -409,8 +404,7 @@ class BloscCodec(BaseCompressionCodec):
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
-        if not issubclass(decoded_representation_type, memoryview):
-            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
+        assert issubclass(decoded_representation_type, memoryview)
         c = self._numcodec_class()
         return memoryview(c.decode(value))
 
@@ -440,8 +434,6 @@ class ShardingCodec(BaseCodec):
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
-        if not issubclass(decoded_representation_type, memoryview):
-            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
         raise NotImplementedError()
 
 
