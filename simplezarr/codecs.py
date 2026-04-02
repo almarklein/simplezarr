@@ -9,6 +9,13 @@ https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
 Third party code can use can subclass ``BaseCodec`` and use ``register_codec()`` to implement custom codecs as extensions.
 
 In this code, bytes are represented as a 1D memoryview, so that slices can be made without making copies. Arrays are represented with numpy arrays.
+
+On error reporting:
+
+* Asserts are made only to test the internal integrity of this module.
+* CodecError is raised when the requested list of codecs is not valid, in terms of input and output types.
+* Otherwise, the appropriate Python error is raised.
+
 """
 
 from __future__ import annotations
@@ -30,9 +37,25 @@ def register_codec(cls: type):
     assert isinstance(cls, type) and issubclass(cls, BaseCodec)
     assert cls.name
     CODEC_CLASS_BY_NAME[cls.name] = cls
+    return cls
 
 
 ndarray = np.ndarray
+
+
+class CodecError(Exception):
+    pass
+
+
+class ArrayType(np.ndarray):
+    shape = ()
+    dtype = ""
+
+    @classmethod
+    def match(cls, a):
+        return (
+            isinstance(a, np.ndarray) and a.shape == cls.shape and a.dtype == cls.dtype
+        )
 
 
 def create_ndarray_type(shape: tuple[int, ...], dtype: str):
@@ -42,32 +65,45 @@ def create_ndarray_type(shape: tuple[int, ...], dtype: str):
     """
     assert isinstance(dtype, str)
     shape_str = "x".join(str(i) for i in shape)
+    name = f"ndarray_{shape_str}_{dtype}"
     return type(
-        f"ndarray_{shape_str}_{dtype}",
-        (ndarray,),
-        {"shape": shape, "dtype": dtype, "__module__": ""},
+        name,
+        (ArrayType,),
+        {"shape": shape, "dtype": dtype},
     )
 
 
 def is_byte_like(value):
-    return isinstance(value, memoryview) and value.ndim == 1 and value.format == "B"
+    return isinstance(value, bytes) or (
+        isinstance(value, memoryview) and value.ndim == 1 and value.format == "B"
+    )
 
 
 def encode_array(array: ndarray, codec_dicts: list[dict]) -> memoryview:
     """Encode the given array to bytes, using the codecs as described in the codec_dicts."""
 
+    if not isinstance(array, np.ndarray):
+        raise TypeError(
+            f"encode_array expects array, but got {array.__class__.__name__}"
+        )
+
     # Get codecs, with their order validated
-    array_type = create_ndarray_type(array.shape, array.dtype)
+    array_type = create_ndarray_type(array.shape, array.dtype.name)
     codecs, decoded_representation_types = resolve_codecs_from_dicts(
         codec_dicts, array_type
     )
 
     # Encode
     value = array
-    assert isinstance(value, decoded_representation_types[0])
+    assert issubclass(decoded_representation_types[0], ArrayType)
+    assert decoded_representation_types[0].match(value)
     for i in range(len(codecs)):
         value = codecs[i].encode(value)
-        assert isinstance(value, decoded_representation_types[i + 1])
+        ref_type = decoded_representation_types[i + 1]
+        if ref_type is memoryview:
+            assert is_byte_like(value)
+        else:
+            assert ref_type.match(value)
 
     return value
 
@@ -77,7 +113,10 @@ def decode_bytes(
 ) -> ndarray:
     """Decode the given bytes, using the codecs as described in the codec_dicts."""
 
-    assert is_byte_like(encoded_bytes)
+    if not is_byte_like(encoded_bytes):
+        raise TypeError(
+            f"decode_bytes expects bytes as a memoryview, but got {encoded_bytes.__class__.__name__}"
+        )
 
     # Get codecs, with their order validated
     codecs, decoded_representation_types = resolve_codecs_from_dicts(
@@ -115,7 +154,7 @@ def resolve_codecs_from_dicts(
         try:
             cls = CODEC_CLASS_BY_NAME[name]
         except KeyError:
-            raise RuntimeError(f"Unknown Zarr codec {name}") from None
+            raise TypeError(f"Unknown Zarr codec {name}") from None
         codecs.append(cls(**configuration))
 
     # Resolve types
@@ -127,7 +166,8 @@ def resolve_codecs_from_dicts(
         )
         decoded_representation_types.append(t)
 
-    assert decoded_representation_types[-1] is memoryview
+    if decoded_representation_types[-1] is not memoryview:
+        raise CodecError("Final codec does not return memoryview")
 
     return codecs, decoded_representation_types
 
@@ -162,19 +202,19 @@ class BaseCodec:
                 # the subclass should overload this method.
                 return decoded_representation_type
             else:
-                raise RuntimeError("BytesCodec only encodes arrays.")
+                raise CodecError(f"{self.__class__.__name__} only encodes arrays.")
         elif self._type == "a->b":
             if issubclass(decoded_representation_type, ndarray):
                 return memoryview
             else:
-                raise RuntimeError("BytesCodec only encodes arrays.")
+                raise CodecError(f"{self.__class__.__name__} only encodes arrays.")
         elif self._type == "b->b":
             if issubclass(decoded_representation_type, memoryview):
                 return memoryview
             else:
-                raise RuntimeError("BytesCodec only encodes bytes (memoryview).")
+                raise CodecError(f"{self.__class__.__name__} encodes bytes/memoryview.")
         else:
-            raise RuntimeError(f"Invalid Codec._type: {self._type!r}")
+            raise AssertionError(f"Invalid Codec._type: {self._type!r}")
 
     def encode(self, value: memoryview | ndarray) -> memoryview | ndarray:
         """Encode the given value (memoryview or array)."""
@@ -200,7 +240,7 @@ class BaseChecksumCodec(BaseCodec):
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         if not issubclass(decoded_representation_type, memoryview):
-            raise RuntimeError(f"{self.__class__.__name__} decodes into bytes.")
+            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
         return memoryview(self._numcodec_class().decode(value))
 
 
@@ -209,16 +249,20 @@ class BaseCompressionCodec(BaseCodec):
 
     _type = "b->b"
     _numcodec_class = None
+    _options = ["level"]
 
     def encode(self, value: memoryview) -> memoryview:
-        level = self._configuration.get("level", 6)
-        return memoryview(self._numcodec_class(level).encode(value))
+        options = {}
+        for key in self._options:
+            if key in self._configuration:
+                options[key] = self._configuration[key]
+        return memoryview(self._numcodec_class(**options).encode(value))
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         if not issubclass(decoded_representation_type, memoryview):
-            raise RuntimeError(f"{self.__class__.__name__} decodes into bytes.")
+            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
         return memoryview(self._numcodec_class().decode(value))
 
 
@@ -232,17 +276,37 @@ class TransposeCodec(BaseCodec):
     name = "transpose"
     _type = "a->a"
 
+    def compute_encoded_representation_type(self, decoded_representation_type: type):
+        assert isinstance(decoded_representation_type, type)
+        if not issubclass(decoded_representation_type, ArrayType):
+            raise CodecError(f"{self.__class__.__name__} only encodes arrays.")
+
+        shape = decoded_representation_type.shape
+        dtype = decoded_representation_type.dtype
+
+        order = self._configuration.get("order", None)
+        if order is None:
+            shape = tuple(reversed(shape))
+        else:
+            assert len(order) == len(shape)
+            shape = tuple(shape[i] for i in order)
+
+        return create_ndarray_type(shape, dtype)
+
     def encode(self, value: memoryview) -> memoryview:
-        order = self._configuration.get("order", [])
+        order = self._configuration.get("order", None)
         return value.transpose(order)
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         if not issubclass(decoded_representation_type, ndarray):
-            raise RuntimeError(f"{self.__class__.__name__} decodes into array.")
-        order = self._configuration.get("order", [])
-        inverse_order = tuple(int(i) for i in np.argsort(order))
+            raise CodecError(f"{self.__class__.__name__} decodes into array.")
+        order = self._configuration.get("order", None)
+        if order is None:
+            inverse_order = None
+        else:
+            inverse_order = tuple(int(i) for i in np.argsort(order))
         return value.transpose(inverse_order)
 
 
@@ -259,13 +323,13 @@ class BytesCodec(BaseCodec):
     _type = "a->b"
 
     def encode(self, value: ndarray) -> memoryview:
-        # First flatten, a copy is only made if needed
+        # First flatten, a copy is only made if needed. Keep dtype, or byteswap wont work correctly!
         flat = np.ravel(value, order="C")
 
         # Swap byteorder if necessary
         data_byteorder = self._configuration.get("endian", "")
         if data_byteorder in ("big", "little") and sys.byteorder != data_byteorder:
-            flat.byteswap(inplace=True)
+            flat = flat.byteswap()  # always copy bc flat may be a view
 
         # Turn into bytes and return as memoryview
         flat.dtype = np.uint8
@@ -273,7 +337,8 @@ class BytesCodec(BaseCodec):
 
     def decode(self, value: memoryview, decoded_representation_type: type) -> ndarray:
         if not issubclass(decoded_representation_type, ndarray):
-            raise RuntimeError("BytesCodec decodes into arrays.")
+            raise CodecError("BytesCodec decodes into arrays.")
+        assert issubclass(decoded_representation_type, ArrayType)
 
         arr = np.frombuffer(value, decoded_representation_type.dtype)
         arr = arr.reshape(decoded_representation_type.shape)
@@ -283,7 +348,7 @@ class BytesCodec(BaseCodec):
         # matches the system, which is probably a good guess.
         data_byteorder = self._configuration.get("endian", "")
         if data_byteorder in ("big", "little") and sys.byteorder != data_byteorder:
-            arr.byteswap(inplace=True)
+            arr = arr.byteswap()
 
         return arr
 
@@ -320,33 +385,31 @@ class BloscCodec(BaseCompressionCodec):
     name = "blosc"
     _type = "b->b"
     _numcodec_class = numcodecs.Blosc
+    _options = ["cname", "clevel", "shuffle", "typesize", "blocksize"]
 
     def encode(self, value: memoryview) -> memoryview:
-        cname = self._configuration.get("cname", "zstd")
-        clevel = self._configuration.get("clevel", 6)
-        shuffle = self._configuration.get("shuffle", "noshuffle")
-        typesize = self._configuration.get("typesize", 0)  # only needed if shuffling
-        blocksize = self._configuration.get("blocksize", 0)  # 0 means auto
+        options = {}
+        for key in self._options:
+            if key in self._configuration:
+                options[key] = self._configuration[key]
 
-        shuffle_int = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2, 0: 0, 1: 1, 2: 2}[
-            shuffle
-        ]
-        c = self._numcodec_class(
-            cname=cname,
-            clevel=clevel,
-            shuffle=shuffle_int,
-            blocksize=blocksize,
-            typesize=typesize,
-        )
-        return c.encode(value)
+        # Fix shuffle option
+        shuffle_map = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2}
+        shuffle_map.update({0: 0, 1: 1, 2: 2})
+        shuffle = options.pop("shuffle", None)
+        if shuffle is not None:
+            options["shuffle"] = shuffle_map[shuffle]
+
+        c = self._numcodec_class(**options)
+        return memoryview(c.encode(value))
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         if not issubclass(decoded_representation_type, memoryview):
-            raise RuntimeError(f"{self.__class__.__name__} decodes into bytes.")
+            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
         c = self._numcodec_class()
-        return c.decode(value)
+        return memoryview(c.decode(value))
 
 
 @register_codec
@@ -375,7 +438,7 @@ class ShardingCodec(BaseCodec):
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         if not issubclass(decoded_representation_type, memoryview):
-            raise RuntimeError(f"{self.__class__.__name__} decodes into bytes.")
+            raise CodecError(f"{self.__class__.__name__} decodes into bytes.")
         raise NotImplementedError()
 
 
@@ -410,12 +473,14 @@ class Jenkinslookup3Codec(BaseChecksumCodec):
 class Lz4Codec(BaseCompressionCodec):
     name = "lz4"
     _numcodec_class = numcodecs.lz4
+    _options = ["acceleration"]
 
 
 @register_codec
 class ZstdCodec(BaseCompressionCodec):
     name = "zstd"
     _numcodec_class = numcodecs.Zstd
+    _options = ["level", "checksum"]
 
 
 @register_codec
