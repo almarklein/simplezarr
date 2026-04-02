@@ -39,3 +39,15 @@ ignore = [
     "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
     "E731",   # Do not assign a `lambda` expression, use a `def
 ]
+
+
+[tool.coverage.report]
+
+exclude_also = [
+    # Have to re-enable the standard pragma, plus a less-ugly flavor
+    "pragma: no cover",
+    "no-cover",
+    "raise NotImplementedError",
+    "raise AssertionError",
+    "if __name__ == .__main__.:",
+]
