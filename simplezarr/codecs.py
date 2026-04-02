@@ -74,9 +74,7 @@ def create_ndarray_type(shape: tuple[int, ...], dtype: str):
 
 
 def is_byte_like(value):
-    return isinstance(value, bytes) or (
-        isinstance(value, memoryview) and value.ndim == 1 and value.format == "B"
-    )
+    return isinstance(value, memoryview) and value.ndim == 1 and value.format == "B"
 
 
 def encode_array(array: ndarray, codec_dicts: list[dict]) -> memoryview:
@@ -129,9 +127,14 @@ def decode_bytes(
 
     # Decode
     value = encoded_bytes
-    assert isinstance(value, decoded_representation_types[0])
+    assert decoded_representation_types[0] is memoryview
     for i in range(len(codecs)):
         value = codecs[i].decode(value, decoded_representation_types[i + 1])
+        ref_type = decoded_representation_types[i + 1]
+        if ref_type is memoryview:
+            assert is_byte_like(value)
+        else:
+            assert ref_type.match(value)
 
     return value
 

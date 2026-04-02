@@ -1,4 +1,3 @@
-
 # ruff: noqa: N806
 
 from simplezarr import codecs as codecsmod
@@ -118,6 +117,14 @@ def test_resolve_codecs_from_dicts_order_errors():
     with pytest.raises(codecsmod.CodecError):
         resolve_codecs_from_dicts(d, array_type)
 
+    # Fail: codecs don't fit v3
+    d = [
+        {"name": "bytes", "configuration": {"endian": "little"}},
+        {"name": "bytes", "configuration": {"endian": "little"}},
+    ]
+    with pytest.raises(codecsmod.CodecError):
+        resolve_codecs_from_dicts(d, array_type)
+
 
 def test_resolve_codecs_from_dicts_other_errors():
     resolve_codecs_from_dicts = codecsmod.resolve_codecs_from_dicts
@@ -146,17 +153,65 @@ def test_encode_decode_round_trip():
     ]
 
     image = np.random.uniform(0, 128, (640, 480)).astype(np.uint8) * 2
+    array_type = codecsmod.create_ndarray_type(image.shape, image.dtype.name)
+
+    # First some type checking
+    with pytest.raises(TypeError):
+        codecsmod.encode_array(b"1234", d)
+    with pytest.raises(TypeError):
+        codecsmod.encode_array(memoryview(b"1234"), d)
+    with pytest.raises(TypeError):
+        codecsmod.decode_bytes(b"1234", d, array_type)
+    with pytest.raises(TypeError):
+        codecsmod.decode_bytes(image, d, array_type)
+
+    # Encode
 
     bb = codecsmod.encode_array(image, d)
     assert memoryview(bb)
 
-    array_type = codecsmod.create_ndarray_type(image.shape, image.dtype.name)
-    image2 = codecsmod.decode_bytes(bb, d, array_type)
+    # Decode
 
+    image2 = codecsmod.decode_bytes(bb, d, array_type)
     assert isinstance(image2, np.ndarray)
     assert image2.shape == image.shape
     assert image2.dtype == image.dtype
     assert np.all(image == image2)
+
+
+def test_custom_codec():
+    @codecsmod.register_codec
+    class MyCodec1(codecsmod.BaseCodec):
+        name = "test_mycodec1"
+        _type = "a->a"
+
+        def encode(self, value):
+            return value + 1
+
+        def decode(self, value, decoded_representation_type):
+            return value - 1
+
+    d = [
+        {"name": "test_mycodec1", "configuration": {}},
+        {"name": "bytes", "configuration": {"endian": "little"}},
+    ]
+
+    image = np.random.uniform(0, 128, (640, 480)).astype(np.uint8) * 2
+    array_type = codecsmod.create_ndarray_type(image.shape, image.dtype.name)
+
+    bb = codecsmod.encode_array(image, d)
+    image2 = codecsmod.decode_bytes(bb, d, array_type)
+    assert isinstance(image2, np.ndarray)
+    assert np.all(image == image2)
+
+    # Check resolve error
+    d = [
+        {"name": "bytes", "configuration": {"endian": "little"}},
+        {"name": "test_mycodec1", "configuration": {}},
+    ]
+
+    with pytest.raises(codecsmod.CodecError):
+        codecsmod.resolve_codecs_from_dicts(d, array_type)
 
 
 # %%%%% Individual codecs
@@ -166,6 +221,17 @@ def test_transpose_codec():
     TransposeCodec = codecsmod.TransposeCodec
 
     arr0 = np.random.uniform(0, 128, (12, 14, 16)).astype(np.uint8) * 2
+    array_type = codecsmod.create_ndarray_type(arr0.shape, arr0.dtype.name)
+
+    # Type resolving
+    type = TransposeCodec().compute_encoded_representation_type(array_type)
+    assert type.shape == (16, 14, 12)
+    type = TransposeCodec(order=(0, 2, 1)).compute_encoded_representation_type(
+        array_type
+    )
+    assert type.shape == (12, 16, 14)
+
+    # Encode / decode
 
     c = TransposeCodec()
     arr1 = c.encode(arr0)
@@ -200,14 +266,19 @@ def test_bytes_codec():
     arr2 = c.decode(mem1, array_type)
     assert np.all(arr0 == arr2)
 
-    m2 = c.encode(arr0)
-
     # Test endian param
-    c = BytesCodec(endian="little")
-    m1 = c.encode(arr0)
-    c = BytesCodec(endian="big")
-    m2 = c.encode(arr0)
-    assert m1 != m2
+
+    c_little = BytesCodec(endian="little")
+    mem1_little = c_little.encode(arr0)
+    arr2_little = c_little.decode(mem1_little, array_type)
+    assert np.all(arr0 == arr2_little)
+
+    c_big = BytesCodec(endian="big")
+    mem1_big = c_big.encode(arr0)
+    arr2_big = c_big.decode(mem1_big, array_type)
+    assert np.all(arr0 == arr2_big)
+
+    assert mem1_little != mem1_big
 
 
 def test_crc32c_codec():
