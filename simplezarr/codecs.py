@@ -26,12 +26,16 @@ The logic for Zarr codecs.
 from __future__ import annotations
 
 import sys
+import logging
+from importlib.metadata import entry_points
 
 import numcodecs
 import numpy as np
 
 
 __all__ = ["create_ndarray_type", "decode_bytes", "encode_array"]
+
+logger = logging.getLogger("simplezarr")
 
 # EXTENSION_POINT: codecs -> codecs can be added here as well as by 3d party code
 
@@ -43,12 +47,23 @@ def register_codec(cls: type):
 
     Can be used as a class decorator. The class must inherit from BaseCodec.
     """
-    assert isinstance(cls, type) and issubclass(cls, BaseCodec)
-    assert cls.name
+    if not (isinstance(cls, type) and issubclass(cls, BaseCodec)):
+        raise TypeError(
+            f"Cannot register object as a a simplezarr codec because it does not subclass BaseCodec: {cls}"
+        )
+    if not cls.name:
+        raise TypeError(
+            f"Cannot register {cls} as a a simplezarr codec because it does not have a name."
+        )
+    if cls.kind not in VALID_KINDS:
+        raise TypeError(
+            f"Cannot register {cls} as a a simplezarr codec because it's kind ({cls.kind!r}) is not one of {VALID_KINDS}."
+        )
     CODEC_CLASS_BY_NAME[cls.name] = cls
     return cls
 
 
+VALID_KINDS = {"a->a", "a->b", "b->b"}
 ndarray = np.ndarray
 
 
@@ -197,15 +212,20 @@ class BaseCodec:
 
     This defines the methods that a codec must have according to the Zarr spec.
     The handling of ``decoded_representation_type`` may look a bit awkward; it
-    is there to validate the codecs, and that the order of codecs is valid.
+    is there to validate the codecs and their order.
     """
 
     name = ""  # Subclasses must set this
 
-    _type = ""  # Subclasses myst set this to either "a->a", "a->b", "b->b"
+    kind = ""  # Subclasses myst set this to either "a->a", "a->b", "b->b"
 
     def __init__(self, **configuration):
         self._configuration = configuration
+
+    @property
+    def configuration(self):
+        """A dict with the configuration for this codec."""
+        return self._configuration
 
     def compute_encoded_representation_type(self, decoded_representation_type: type):
         """Get the type of the value produced by ``encode()``, given the input.
@@ -216,25 +236,25 @@ class BaseCodec:
         Subclasses that do "a->" may need to overload this method. For other codecs this implementation does the trick.
         """
         assert isinstance(decoded_representation_type, type)
-        if self._type == "a->a":
+        if self.kind == "a->a":
             if issubclass(decoded_representation_type, ndarray):
                 # Assume we return an array with same shape and dtype. If this is not the case,
                 # the subclass should overload this method.
                 return decoded_representation_type
             else:
                 raise CodecError(f"{self.__class__.__name__} only encodes arrays.")
-        elif self._type == "a->b":
+        elif self.kind == "a->b":
             if issubclass(decoded_representation_type, ndarray):
                 return memoryview
             else:
                 raise CodecError(f"{self.__class__.__name__} only encodes arrays.")
-        elif self._type == "b->b":
+        elif self.kind == "b->b":
             if issubclass(decoded_representation_type, memoryview):
                 return memoryview
             else:
                 raise CodecError(f"{self.__class__.__name__} encodes bytes/memoryview.")
         else:
-            raise AssertionError(f"Invalid Codec._type: {self._type!r}")
+            raise AssertionError(f"Invalid Codec.kind: {self.kind!r}")
 
     def encode(self, value: memoryview | ndarray) -> memoryview | ndarray:
         """Encode the given value (memoryview or array)."""
@@ -250,38 +270,38 @@ class BaseCodec:
 class BaseChecksumCodec(BaseCodec):
     """Base codec for numcodecs checksums."""
 
-    _type = "b->b"
-    _numcodec_class = None
+    kind = "b->b"
+    numcodec_class = None
 
     def encode(self, value: memoryview) -> memoryview:
-        return memoryview(self._numcodec_class().encode(value))
+        return memoryview(self.numcodec_class().encode(value))
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         assert issubclass(decoded_representation_type, memoryview)
-        return memoryview(self._numcodec_class().decode(value))
+        return memoryview(self.numcodec_class().decode(value))
 
 
 class BaseCompressionCodec(BaseCodec):
     """Base codec for numcodecs compression."""
 
-    _type = "b->b"
-    _numcodec_class = None
-    _options = ["level"]
+    kind = "b->b"
+    numcodec_class = None
+    options = ["level"]
 
     def encode(self, value: memoryview) -> memoryview:
         options = {}
-        for key in self._options:
+        for key in self.options:
             if key in self._configuration:
                 options[key] = self._configuration[key]
-        return memoryview(self._numcodec_class(**options).encode(value))
+        return memoryview(self.numcodec_class(**options).encode(value))
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         assert issubclass(decoded_representation_type, memoryview)
-        return memoryview(self._numcodec_class().decode(value))
+        return memoryview(self.numcodec_class().decode(value))
 
 
 @register_codec
@@ -292,7 +312,7 @@ class TransposeCodec(BaseCodec):
     """
 
     name = "transpose"
-    _type = "a->a"
+    kind = "a->a"
 
     def compute_encoded_representation_type(self, decoded_representation_type: type):
         assert isinstance(decoded_representation_type, type)
@@ -337,7 +357,7 @@ class BytesCodec(BaseCodec):
     """
 
     name = "bytes"
-    _type = "a->b"
+    kind = "a->b"
 
     def encode(self, value: ndarray) -> memoryview:
         # First flatten, a copy is only made if needed. Keep dtype, or byteswap wont work correctly!
@@ -376,7 +396,7 @@ class Crc32cCodec(BaseChecksumCodec):
     """
 
     name = "crc32c"
-    _numcodec_class = numcodecs.CRC32C
+    numcodec_class = numcodecs.CRC32C
 
 
 @register_codec
@@ -387,7 +407,7 @@ class GzipCodec(BaseCompressionCodec):
     """
 
     name = "gzip"
-    _numcodec_class = numcodecs.GZip
+    numcodec_class = numcodecs.GZip
 
 
 @register_codec
@@ -398,13 +418,13 @@ class BloscCodec(BaseCompressionCodec):
     """
 
     name = "blosc"
-    _type = "b->b"
-    _numcodec_class = numcodecs.Blosc
-    _options = ["cname", "clevel", "shuffle", "typesize", "blocksize"]
+    kind = "b->b"
+    numcodec_class = numcodecs.Blosc
+    options = ["cname", "clevel", "shuffle", "typesize", "blocksize"]
 
     def encode(self, value: memoryview) -> memoryview:
         options = {}
-        for key in self._options:
+        for key in self.options:
             if key in self._configuration:
                 options[key] = self._configuration[key]
 
@@ -415,14 +435,14 @@ class BloscCodec(BaseCompressionCodec):
         if shuffle is not None:
             options["shuffle"] = shuffle_map[shuffle]
 
-        c = self._numcodec_class(**options)
+        c = self.numcodec_class(**options)
         return memoryview(c.encode(value))
 
     def decode(
         self, value: memoryview, decoded_representation_type: type
     ) -> memoryview:
         assert issubclass(decoded_representation_type, memoryview)
-        c = self._numcodec_class()
+        c = self.numcodec_class()
         return memoryview(c.decode(value))
 
 
@@ -443,7 +463,7 @@ class ShardingCodec(BaseCodec):
     # Probably not too hard to implement, let's peek at https://github.com/zarr-developers/zarr-python/blob/main/src/zarr/codecs/sharding.py
 
     name = "sharding_indexed"
-    _type = "a->b"
+    kind = "a->b"
 
     def encode(self, value: memoryview) -> memoryview:
         raise NotImplementedError()
@@ -460,54 +480,68 @@ class ShardingCodec(BaseCodec):
 @register_codec
 class Crc32Codec(BaseChecksumCodec):
     name = "crc32"  # without the final 'c'
-    _numcodec_class = numcodecs.CRC32
+    numcodec_class = numcodecs.CRC32
 
 
 @register_codec
 class Adler32Codec(BaseChecksumCodec):
     name = "adler32"
-    _numcodec_class = numcodecs.Adler32
+    numcodec_class = numcodecs.Adler32
 
 
 @register_codec
 class Fletcher32Codec(BaseChecksumCodec):
     name = "fletcher32"
-    _numcodec_class = numcodecs.Fletcher32
+    numcodec_class = numcodecs.Fletcher32
 
 
 @register_codec
 class Jenkinslookup3Codec(BaseChecksumCodec):
     name = "jenkins_lookup3"
-    _numcodec_class = numcodecs.JenkinsLookup3
+    numcodec_class = numcodecs.JenkinsLookup3
 
 
 @register_codec
 class Lz4Codec(BaseCompressionCodec):
     name = "lz4"
-    _numcodec_class = numcodecs.lz4
-    _options = ["acceleration"]
+    numcodec_class = numcodecs.lz4
+    options = ["acceleration"]
 
 
 @register_codec
 class ZstdCodec(BaseCompressionCodec):
     name = "zstd"
-    _numcodec_class = numcodecs.Zstd
-    _options = ["level", "checksum"]
+    numcodec_class = numcodecs.Zstd
+    options = ["level", "checksum"]
 
 
 @register_codec
 class ZlibCodec(BaseCompressionCodec):
     name = "zlib"
-    _numcodec_class = numcodecs.Zlib
+    numcodec_class = numcodecs.Zlib
 
 
 @register_codec
 class Bz2Codec(BaseCompressionCodec):
     name = "bz2"
-    _numcodec_class = numcodecs.BZ2
+    numcodec_class = numcodecs.BZ2
 
 
 @register_codec
 class LzmaCodec(BaseCompressionCodec):
     name = "lzma"
-    _numcodec_class = numcodecs.LZMA
+    numcodec_class = numcodecs.LZMA
+
+
+# %%%%% Codecs provided by other libraries
+
+
+def load_external_codecs():
+    # Called from __init__, this module needs to be finalized before external codecs can import the base class
+    for ep in entry_points(group="simplezarr.codecs"):
+        try:
+            register_codec(ep.load())
+        except ImportError:
+            pass  # package declared it but dependency isn't fully satisfied
+        except Exception as err:
+            logger.warning(f"Could not load external simplezarr codec {ep.name}: {err}")
