@@ -8,7 +8,7 @@ import numpy as np
 
 from .misc import executor, DTYPES, resolve_fill_value
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
-from .codecs import create_ndarray_type, encode_array, decode_bytes
+from .codecs import ArrayType, encode_array, decode_bytes
 from .indexing import ZarrArraySlice, ChunkGridIndexer
 
 
@@ -609,7 +609,7 @@ class ZarrArray(ZarrNode):
 
         # Return decoded
         if encoded_bytes is not None:
-            array_type = create_ndarray_type(self._chunk_shape, self._dtype)
+            array_type = ArrayType.create(self._chunk_shape, self._dtype)
             return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
         elif none_if_missing:
             return None
