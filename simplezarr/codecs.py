@@ -33,7 +33,13 @@ import numcodecs
 import numpy as np
 
 
-__all__ = ["create_ndarray_type", "decode_bytes", "encode_array"]
+__all__ = [
+    "decode_bytes",
+    "encode_array",
+    "ArrayType",
+    "BaseCodec",
+    "CodecError",
+]
 
 logger = logging.getLogger("simplezarr")
 
@@ -45,7 +51,7 @@ CODEC_CLASS_BY_NAME = {}
 def register_codec(cls: type):
     """Register a codec class.
 
-    Can be used as a class decorator. The class must inherit from BaseCodec.
+    Can be used as a class decorator. The class must inherit from ``BaseCodec``.
     """
     if not (isinstance(cls, type) and issubclass(cls, BaseCodec)):
         raise TypeError(
@@ -74,10 +80,10 @@ class CodecError(Exception):
 
 
 class ArrayType(np.ndarray):
-    """An array subtype that defines shape and dtype."""
+    """A subclass of ``np.ndarray`` with ``shape`` and ``dtype`` attributes."""
 
-    shape = ()  # type: ignore
-    dtype = ""  # type: ignore
+    shape = ()  #:: Class attribute that defines the shape of the array
+    dtype = ""  #:: Class attribute that defines the dtype of the array
 
     @classmethod
     def match(cls, a):
@@ -86,20 +92,18 @@ class ArrayType(np.ndarray):
             isinstance(a, np.ndarray) and a.shape == cls.shape and a.dtype == cls.dtype
         )
 
-
-def create_ndarray_type(shape: tuple[int, ...], dtype: str):
-    """Create an ``np.ndarray`` subtype with a shape and dtype property.
-
-    This class is needed by the codecs, so that the decoder can turn the bytes into the correct array.
-    """
-    assert isinstance(dtype, str)
-    shape_str = "x".join(str(i) for i in shape)
-    name = f"ndarray_{shape_str}_{dtype}"
-    return type(
-        name,
-        (ArrayType,),
-        {"shape": tuple(shape), "dtype": dtype},
-    )
+    @classmethod
+    def create(cls, shape: tuple[int, ...], dtype: str):
+        """Create an ``ArrayType`` subtype with a shape and dtype property."""
+        assert isinstance(dtype, str)
+        assert isinstance(shape, tuple) and all(isinstance(i, int) for i in shape)
+        shape_str = "x".join(str(i) for i in shape)
+        name = f"ndarray_{shape_str}_{dtype}"
+        return type(
+            name,
+            (ArrayType,),
+            {"shape": tuple(shape), "dtype": dtype},
+        )
 
 
 def is_byte_like(value):
@@ -116,7 +120,7 @@ def encode_array(array: ndarray, codec_dicts: list[dict]) -> memoryview:
         )
 
     # Get codecs, with their order validated
-    array_type = create_ndarray_type(array.shape, array.dtype.name)
+    array_type = ArrayType.create(array.shape, array.dtype.name)
     codecs, decoded_representation_types = resolve_codecs_from_dicts(
         codec_dicts, array_type
     )
@@ -210,14 +214,12 @@ def resolve_codecs_from_dicts(
 class BaseCodec:
     """The base codec class.
 
-    This defines the methods that a codec must have according to the Zarr spec.
-    The handling of ``decoded_representation_type`` may look a bit awkward; it
-    is there to validate the codecs and their order.
+    Codecs must subclass this, set the class attribute, and implement its methods.
     """
 
-    name = ""  # Subclasses must set this
+    name = ""  #:: Class attribute that defines the name of this codec.
 
-    kind = ""  # Subclasses myst set this to either "a->a", "a->b", "b->b"
+    kind = ""  #:: Class attribute that must be "a->a", "a->b" or "b->b".
 
     def __init__(self, **configuration):
         self._configuration = configuration
@@ -228,12 +230,19 @@ class BaseCodec:
         return self._configuration
 
     def compute_encoded_representation_type(self, decoded_representation_type: type):
-        """Get the type of the value produced by ``encode()``, given the input.
+        """Given the input's type, get the type of the value produced by ``encode()``.
 
-        The returned type is either ``memoryview`` or an ``np.ndarray`` subclass.
+        This method is used to validate the codec sequence, and for decoding to
+        resolve the types at each step before applying the step, so that
+        ``decode()`` knows the type that it should return.
+
+        The returned type is either ``memoryview`` or an ``ArrayType`` subclass.
         It raises an error when the input type is invalid.
 
-        Subclasses that do "a->" may need to overload this method. For other codecs this implementation does the trick.
+        Subclasses that do "a->a" and change the shape or dtype of the input,
+        must overload this method to return an ``ArrayType`` subclass with the
+        correct dtype and shape. For other codecs this implementation does the
+        trick.
         """
         assert isinstance(decoded_representation_type, type)
         if self.kind == "a->a":
@@ -263,7 +272,12 @@ class BaseCodec:
     def decode(
         self, value: memoryview | ndarray, decoded_representation_type: type
     ) -> memoryview | ndarray:
-        """Decode the given value (memoryview or array)."""
+        """Decode the given value (memoryview or array).
+
+        The ``decoded_representation_type`` represents the type of the returned
+        value. If this is an array, the ``decoded_representation_type`` is an
+        ``ArrayType`` subclass with ``shape`` and ``dtype`` attributes.
+        """
         raise NotImplementedError()
 
 
@@ -329,7 +343,7 @@ class TransposeCodec(BaseCodec):
             assert len(order) == len(shape)
             shape = tuple(shape[i] for i in order)
 
-        return create_ndarray_type(shape, dtype)
+        return ArrayType.create(shape, dtype)
 
     def encode(self, value: memoryview) -> memoryview:
         order = self._configuration.get("order", None)
