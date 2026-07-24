@@ -569,7 +569,7 @@ class ZarrArray(ZarrNode):
             "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set_now(foo)`` or ``a[..].set_soon(foo)``."
         )
 
-    def get_chunk_now(self, index, none_if_missing=False) -> None | np.ndarray:
+    def get_chunk_now(self, index, none_if_missing=False) -> np.ndarray | None:
         """Read a chunk from the store.
 
         This function is synchronous; you may want to use ``get_chunk_soon()``
